@@ -37,13 +37,7 @@ export default function HomePageComponent() {
     cornerstone.loadImage(imageId).then((image: any) => {
       cornerstone.displayImage(element, image);
 
-      // ✅ Add tools with yellow color configuration
-      cornerstoneTools.addTool(cornerstoneTools.RectangleRoiTool, {
-        configuration: {
-          color: "yellow",
-          activeColor: "yellow",
-        },
-      });
+      cornerstoneTools.addTool(cornerstoneTools.RectangleRoiTool);
       cornerstoneTools.addTool(cornerstoneTools.PanTool);
       cornerstoneTools.addTool(cornerstoneTools.ZoomTool);
 
@@ -60,6 +54,7 @@ export default function HomePageComponent() {
 
   const handleToolChange = (toolName: string) => {
     cornerstoneTools.setToolActive(toolName, { mouseButtonMask: 1 });
+    console.log(toolName + " using")
   };
 
   const handleReset = () => {
