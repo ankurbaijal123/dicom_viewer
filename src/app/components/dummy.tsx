@@ -54,12 +54,12 @@ export default function HomePageComponent() {
       cornerstoneTools.addTool(cornerstoneTools.LengthTool);
       cornerstoneTools.addTool(cornerstoneTools.EllipticalRoiTool, {
         configuration: {
-          renderHandle: false,
+          renderHandle: false, 
         },
       });
       cornerstoneTools.addTool(cornerstoneTools.AngleTool);
       cornerstoneTools.toolColors.setToolColor("rgb(255, 255, 0)");
-      cornerstoneTools.toolStyle.setToolWidth(3);
+      cornerstoneTools.toolStyle.setToolWidth(2);
       //cornerstoneTools.toolStyle.setToolDash([4, 2])
 
       setLoaded(true);
