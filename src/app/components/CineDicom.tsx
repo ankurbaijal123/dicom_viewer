@@ -8,6 +8,7 @@ import {
     StackViewport,
     init as cornerstoneCoreInit,
 } from "@cornerstonejs/core";
+
 import {
     init as cornerstoneToolsInit,
     ToolGroupManager,
@@ -21,28 +22,59 @@ import {
     EllipticalROITool,
     AngleTool,
     annotation,
+    LabelTool,
+    MagnifyTool,
 } from "@cornerstonejs/tools";
+
 import hardcodedMetaDataProvider from "../lib/hardcodedMetaDataProvider";
-import registerLoader from "@cornerstonejs/dicom-image-loader";
+import { viewport } from "@cornerstonejs/tools/utilities";
 
 const renderingEngineId = "myRenderingEngine";
 const viewportId = "myViewport";
 const toolGroupId = "myToolGroup";
+
 export default function DicomViewer() {
     const elementRef = useRef<HTMLDivElement>(null);
     const [loaded, setLoaded] = useState(false);
     const renderingEngineRef = useRef<RenderingEngine | null>(null);
-    const [frameIndex, setFrameIndex] = useState(0);
+    const [frameIndex, setFrameIndex] = useState(1);
     const [frameCount, setFrameCount] = useState(1);
     const [isPlaying, setIsPlaying] = useState(false);
-    const [speed, setSpeed] = useState(24);
-    const playIntervalRef = useRef(null);
+    const [speed, setSpeed] = useState(1);
+    const playIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const [cornerstoneElement, setCornerstoneElement] = useState<any>(null);
+    const [labelInputVisible, setLabelInputVisible] = useState(false);
+    const [labelInputCoords, setLabelInputCoords] = useState({ x: 0, y: 0 });
+    const [labelInputValue, setLabelInputValue] = useState("");
+    const prevToolRef = useRef<string | null>(null);
+    // Accepts null or Point3 (number[] of length 3)
+    const currentWorldPosRef = useRef<number[] | null>(null);
+    const currentImageIdRef = useRef<string | null>(null);
 
+    useEffect(() => {
+        const element = document.getElementById("cornerstoneDiv");
+        setCornerstoneElement(element);
+    }, []);
 
     const fetchDicomFile = async () => {
         const response = await fetch("/dicom_1.dcm");
         return await response.blob();
     };
+
+    const handleFlip = (type: string) => {
+        const viewport = renderingEngineRef.current?.getViewport(
+            viewportId
+        ) as StackViewport;
+
+        const { flipVertical, flipHorizontal } = viewport.getCamera();
+
+        viewport.setCamera({
+            flipHorizontal: type === "HFlip" ? !flipHorizontal : flipHorizontal,
+            flipVertical: type === "VFlip" ? !flipVertical : flipVertical,
+        });
+        viewport.render();
+    };
+
     useEffect(() => {
         const initialize = async () => {
             try {
@@ -62,6 +94,7 @@ export default function DicomViewer() {
                 const element = elementRef.current;
                 const renderingEngine = new RenderingEngine(renderingEngineId);
                 renderingEngineRef.current = renderingEngine;
+
                 renderingEngine.setViewports([
                     {
                         viewportId,
@@ -70,34 +103,34 @@ export default function DicomViewer() {
                     },
                 ]);
 
-                const viewport = renderingEngine.getViewport(viewportId) as StackViewport;
+                const viewport = renderingEngine.getViewport(
+                    viewportId
+                ) as StackViewport;
                 const imageBlob = await fetchDicomFile();
                 const baseImageId = wadouri.fileManager.add(imageBlob);
 
                 await imageLoader.loadImage(baseImageId);
 
                 const metadata = metaData.get("multiframeModule", baseImageId);
-                console.log("Multiframe metadata:", metadata);
-
-                if (!metadata || typeof metadata.NumberOfFrames !== "number" || metadata.NumberOfFrames <= 0) {
+                if (
+                    !metadata ||
+                    typeof metadata.NumberOfFrames !== "number" ||
+                    metadata.NumberOfFrames <= 0
+                ) {
                     throw new Error("Invalid or missing NumberOfFrames in metadata");
                 }
 
                 const numberOfFrames = metadata.NumberOfFrames;
                 setFrameCount(numberOfFrames);
 
-
-
                 const imageIds = [];
                 for (let i = 0; i < numberOfFrames; i++) {
-                    imageIds.push(`${baseImageId}?frame=${i}`);
+                    imageIds.push(`${baseImageId}?frame=${i + 1}`);
                 }
 
                 await viewport.setStack(imageIds);
-                viewport?.setImageIdIndex(1);
-
-                viewport.render(); // 👈 Force render first frame
-
+                viewport.setImageIdIndex(1);
+                viewport.render();
 
                 [
                     PanTool,
@@ -107,6 +140,8 @@ export default function DicomViewer() {
                     RectangleROITool,
                     EllipticalROITool,
                     AngleTool,
+                    LabelTool,
+                    MagnifyTool,
                 ].forEach(addTool);
 
                 const toolGroup = ToolGroupManager.createToolGroup(toolGroupId);
@@ -120,8 +155,16 @@ export default function DicomViewer() {
                     RectangleROITool,
                     EllipticalROITool,
                     AngleTool,
+                    LabelTool,
                 ].forEach((Tool) => {
                     toolGroup.addTool(Tool.toolName);
+                });
+
+                toolGroup.addTool(MagnifyTool.toolName, {
+                    configuration: {
+                        magnificationLevel: 1,
+                        elementRadius: 70,
+                    },
                 });
 
                 toolGroup.addViewport(viewportId, renderingEngineId);
@@ -133,59 +176,93 @@ export default function DicomViewer() {
         };
 
         initialize();
-        
 
         return () => {
             if (playIntervalRef.current) {
                 clearInterval(playIntervalRef.current);
             }
         };
-
-
     }, []);
 
-  useEffect(() => {
-  if (!isPlaying) {
-    if (playIntervalRef.current) clearInterval(playIntervalRef.current);
-    return;
-  }
+    // 💡 DOUBLE CLICK ADD LABEL TOOL
+    useEffect(() => {
+        if (!cornerstoneElement || !loaded) return;
 
-  playIntervalRef.current = setInterval(() => {
-    setFrameIndex((prevIndex) => {
-      if (prevIndex + 1 >= frameCount) {
-        setIsPlaying(false); // pause at end
-        return prevIndex;     // stay on last frame
-      }
-      const nextIndex = prevIndex + 1;
+        const handler = (event: MouseEvent) => {
+            const toolGroup = ToolGroupManager.getToolGroup(toolGroupId);
+            const viewport = renderingEngineRef.current?.getViewport(viewportId) as StackViewport;
+            if (!viewport || !toolGroup) return;
 
-      const viewport = renderingEngineRef.current?.getViewport(viewportId);
-      if (viewport) {
-        viewport.setImageIdIndex(nextIndex);
-        viewport.render();
-      }
-      return nextIndex;
-    });
-  }, 1000 / speed);
+            const canvas = viewport.getCanvas();
+            const rect = canvas.getBoundingClientRect();
+            const coords: [number, number] = [
+                event.clientX - rect.left,
+                event.clientY - rect.top,
+            ];
 
-  return () => {
-    if (playIntervalRef.current) clearInterval(playIntervalRef.current);
-  };
-}, [isPlaying, speed, frameCount]);
+            const worldPos = viewport.canvasToWorld(coords);
+            const imageId = viewport.getCurrentImageId();
+
+            currentWorldPosRef.current = worldPos;
+            currentImageIdRef.current = imageId;
+            setLabelInputCoords({ x: event.clientX, y: event.clientY });
+            setLabelInputValue(""); // clear any previous input
+            setLabelInputVisible(true);
+        };
+
+        cornerstoneElement.addEventListener("dblclick", handler);
+        console.log("✅ Double-click handler attached");
+
+        return () => {
+            cornerstoneElement.removeEventListener("dblclick", handler);
+        };
+    }, [cornerstoneElement, loaded]);
 
 
-  const handlePlay = () => {
-    if (!isPlaying) setIsPlaying(true);
-  };
+    useEffect(() => {
+        if (!isPlaying) {
+            if (playIntervalRef.current) clearInterval(playIntervalRef.current);
+            return;
+        }
 
-  const handlePause = () => {
-    setIsPlaying(false);
-  };
+        playIntervalRef.current = setInterval(() => {
+            setFrameIndex((prevIndex) => {
+                if (prevIndex + 1 >= frameCount) {
+                    setIsPlaying(false);
+                    return 0;
+                }
+                const nextIndex = prevIndex + 1;
+                const viewport = renderingEngineRef.current?.getViewport(
+                    viewportId
+                ) as StackViewport;
 
-  const handleSpeedChange = (num: number) => {
-    setSpeed(num);
-  };
+                if (viewport) {
+                    viewport.setImageIdIndex(nextIndex);
+                    viewport.render();
+                }
+                return nextIndex;
+            });
+        }, (1000 / 30) / speed);
+
+        return () => {
+            if (playIntervalRef.current) clearInterval(playIntervalRef.current);
+        };
+    }, [isPlaying, speed, frameCount]);
+
+    const handlePlay = () => {
+        if (!isPlaying) setIsPlaying(true);
+    };
+
+    const handlePause = () => {
+        setIsPlaying(false);
+    };
+
+    const handleSpeedChange = (num: number) => {
+        setSpeed(num);
+    };
 
     const handleToolChange = (selectedToolName: string) => {
+        prevToolRef.current = selectedToolName;
         const toolGroup = ToolGroupManager.getToolGroup(toolGroupId);
         if (!toolGroup) return;
         const allTools = [
@@ -196,6 +273,8 @@ export default function DicomViewer() {
             RectangleROITool.toolName,
             EllipticalROITool.toolName,
             AngleTool.toolName,
+            LabelTool.toolName,
+            MagnifyTool.toolName,
         ];
         allTools.forEach((toolName) => {
             if (toolName === selectedToolName) {
@@ -210,58 +289,116 @@ export default function DicomViewer() {
         viewport?.render();
     };
 
-   
     const handleFrameChange = (index: number) => {
         const viewport = renderingEngineRef.current?.getViewport(
             viewportId
         ) as StackViewport;
         if (index >= 0 && index < frameCount) {
-            viewport?.setImageIdIndex(index);
-            viewport?.render();
+            viewport.setImageIdIndex(index);
+            viewport.render();
             setFrameIndex(index);
         }
-
     };
-
 
     return (
         <div className="flex flex-col items-center w-full min-h-screen bg-black text-white">
             <div className="w-full flex flex-col items-center max-w-5xl p-4">
-
+                <div className="text-2xl font-bold">DICOM Viewer</div>
 
                 <div
+                    id="cornerstoneDiv"
                     ref={elementRef}
-                    className="w-full h-130 aspect-video bg-gray-900 border border-gray-700"
+                    className="w-full h-full aspect-video bg-gray-900 border border-gray-700"
                 />
+                {labelInputVisible && (
+                    <div
+                        style={{
+                            position: "fixed",
+                            top: labelInputCoords.y,
+                            left: labelInputCoords.x,
+                            zIndex: 1000,
+                        }}
+                    >
+                        <input
+                            type="text"
+                            className="w-48 px-3 py-1 border border-white rounded-md text-yellow-400 placeholder-yellow-300 bg-transparent font-['Roboto'] text-sm focus:outline-none focus:ring-1 focus:ring-white"
+                            style={{ color: '#FFFF00' }}
+                            value={labelInputValue}
+                            autoFocus
+                            placeholder="Enter label and press Enter"
+                            onChange={(e) => setLabelInputValue(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                    const worldPos = currentWorldPosRef.current;
+                                    const imageId = currentImageIdRef.current;
+                                    const viewport = renderingEngineRef.current?.getViewport(viewportId);
+                                    const toolGroup = ToolGroupManager.getToolGroup(toolGroupId);
+                                    if (!labelInputValue || !imageId || !worldPos || !viewport || !toolGroup) return;
+                                    
+                                    annotation.state.addAnnotation(
+                                        {
+                                            metadata: {
+                                                toolName: LabelTool.toolName,
+                                                viewPlaneNormal: viewport.getCamera().viewPlaneNormal,
+                                                viewUp: viewport.getCamera().viewUp,
+                                                referencedImageId: imageId,
+                                            },
+                                            data: {
+                                                text: labelInputValue,
+                                                handles: {
+                                                    points: [worldPos as any],
+                                                    activeHandleIndex: null,
+                                                },
+                                            },
+                                        },
+                                        LabelTool.toolName
+                                    );
 
-                {/* Timeline & Scrubber */}
+                                    toolGroup.setToolActive(LabelTool.toolName, {
+                                        bindings: [{ mouseButton: csToolsEnums.MouseBindings.Primary }],
+                                    });
+                                    const previousTool = prevToolRef.current
+                                    // Remove active bindings so tool is not active anymore
+                                    toolGroup.setToolPassive(LabelTool.toolName);
+                                    if (previousTool && previousTool !== LabelTool.toolName) {
+                                        toolGroup.setToolActive(previousTool, {
+                                            bindings: [{ mouseButton: csToolsEnums.MouseBindings.Primary }],
+                                        });
+                                    }
+
+
+
+                                    viewport.render();
+                                    //toolGroup.setToolPassive(LabelTool.toolName);
+                                    setLabelInputVisible(false);
+                                }
+                            }}
+                            onBlur={() => setLabelInputVisible(false)}
+                        />
+                    </div>
+                )}
+
+
                 {frameCount > 1 && (
                     <div className="relative w-full my-3">
                         <input
                             type="range"
                             min={0}
                             max={frameCount - 1}
-                            value={frameIndex}
+                            value={frameIndex - 1}
                             onChange={(e) => handleFrameChange(Number(e.target.value))}
                             className="w-full appearance-none h-2 rounded-full bg-gray-600 outline-none"
                         />
-                        <div className=" left-1/2 -translate-x-1/2 top-1 text-xs text-center">
+                        <div className="left-1/2 -translate-x-1/2 top-1 text-xs text-center">
                             {("00" + Math.floor(frameIndex / 24)).slice(-2)}:
                             {("00" + (frameIndex % 24)).slice(-2)}
                         </div>
-
                     </div>
-
                 )}
 
-                {/* Player Controls */}
                 <div className="w-full flex justify-between items-center gap-2 px-2">
-                    {/* Left */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2"></div>
 
-                    </div>
-
-                    {/* Center Controls */}
                     <div className="flex items-center gap-3">
                         <button
                             onClick={() => handleFrameChange(frameIndex - 1)}
@@ -289,26 +426,28 @@ export default function DicomViewer() {
                         </button>
                         <select
                             className="bg-gray-700 px-3 py-1 rounded text-sm hover:bg-gray-600"
-                            defaultValue="25"
+                            defaultValue="1"
                             onChange={(e) => handleSpeedChange(Number(e.target.value))}
                         >
-                            <option value="15">0.5x</option>
-                            <option value="25">1x</option>
-                            <option value="30">1.5x</option>
-                            <option value="60">2x</option>
+                            <option value="0.5">0.5x</option>
+                            <option value="1">1x</option>
+                            <option value="1.5">1.5x</option>
+                            <option value="2">2x</option>
                         </select>
-
-                    </div>
-
-                    {/* Right */}
-                    <div className="flex items-center gap-2">
-
                     </div>
                 </div>
 
-                {/* Tools */}
                 <div className="flex flex-wrap justify-center gap-3 mt-6 mb-2">
-                    {[PanTool, ZoomTool, LengthTool, RectangleROITool, EllipticalROITool, AngleTool, WindowLevelTool].map((Tool) => (
+                    {[
+                        PanTool,
+                        ZoomTool,
+                        LengthTool,
+                        RectangleROITool,
+                        EllipticalROITool,
+                        AngleTool,
+                        WindowLevelTool,
+                        MagnifyTool,
+                    ].map((Tool) => (
                         <button
                             key={Tool.toolName}
                             onClick={() => handleToolChange(Tool.toolName)}
@@ -319,7 +458,6 @@ export default function DicomViewer() {
                     ))}
                 </div>
 
-                {/* Measurement log */}
                 <button
                     onClick={() => {
                         const ann = annotation.state.getAllAnnotations();
@@ -332,6 +470,4 @@ export default function DicomViewer() {
             </div>
         </div>
     );
-
-
 }
